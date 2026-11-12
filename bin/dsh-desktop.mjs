@@ -271,7 +271,9 @@ function doctorCommand() {
   const check = (label, fn) => {
     try {
       const result = fn();
-      rows.push([result ? 'ok' : 'FAIL', label, result || '']);
+      // Nilai `true` hanya berarti "lulus"; jangan tampilkan sebagai detail.
+      const detail = result === true ? '' : result || '';
+      rows.push([result ? 'ok' : 'FAIL', label, detail]);
     } catch (err) {
       rows.push(['FAIL', label, err.message]);
     }
