@@ -28,7 +28,8 @@
     "packages/dsh-git-tab",
     "README.md",
     "README.id.md",
-    "LICENSE"
+    "LICENSE",
+    "!**/*.tgz"
   ],
   "keywords": [
     "deepseek-harness",
