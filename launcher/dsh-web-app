@@ -1,0 +1,501 @@
+#!/usr/bin/env bash
+# dsh-web-app — buka DSH Web GUI sebagai jendela aplikasi (tanpa tab / address bar).
+#
+# Cara kerja:
+#   1. Server DSH dinyalakan di background (tanpa terminal, tanpa membuka browser).
+#   2. URL bertoken dari server ditangkap, lalu dibuka sebagai jendela app.
+#   3. Saat jendela terakhir ditutup, server ikut dimatikan.
+#
+# Klik shortcut lagi saat server masih hidup -> server dipakai ulang (tanpa bentrok port).
+
+set -uo pipefail
+
+APP_ID="dsh-desktop"
+APP_NAME="DSH Desktop"
+
+# ── Lokasi & state ───────────────────────────────────────────────────────────
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/$APP_ID/config.env"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/$APP_ID"
+RUN_DIR="${XDG_RUNTIME_DIR:-/tmp}/$APP_ID"
+LOG_FILE="$STATE_DIR/$APP_ID.log"
+SERVER_LOG="$STATE_DIR/server.log"
+SERVER_PID_FILE="$RUN_DIR/server.pid"
+SERVER_URL_FILE="$RUN_DIR/server.url"
+CLIENT_DIR="$RUN_DIR/clients"
+JANITOR_PID_FILE="$RUN_DIR/janitor.pid"
+LOCK_FILE="$RUN_DIR/.lock"
+
+# Tanpa direktori state, seluruh peluncuran gagal tanpa pesan yang berguna.
+# Jadi: coba buat, dan kalau gagal, pindah ke fallback yang pasti bisa ditulis.
+prepare_dirs() {
+  if mkdir -p "$STATE_DIR" "$RUN_DIR" "$CLIENT_DIR" 2>/dev/null; then
+    return 0
+  fi
+  local fallback="${TMPDIR:-/tmp}/${APP_ID}-$(id -u)"
+  mkdir -p "$fallback/state" "$fallback/run/clients" 2>/dev/null || {
+    printf '%s\n' "$APP_NAME: tidak bisa membuat direktori state di $STATE_DIR maupun $fallback" >&2
+    exit 1
+  }
+  STATE_DIR="$fallback/state"
+  RUN_DIR="$fallback/run"
+  LOG_FILE="$STATE_DIR/$APP_ID.log"
+  SERVER_LOG="$STATE_DIR/server.log"
+  SERVER_PID_FILE="$RUN_DIR/server.pid"
+  SERVER_URL_FILE="$RUN_DIR/server.url"
+  CLIENT_DIR="$RUN_DIR/clients"
+  JANITOR_PID_FILE="$RUN_DIR/janitor.pid"
+  LOCK_FILE="$RUN_DIR/.lock"
+  printf '%s\n' "memakai direktori state cadangan: $fallback" >&2
+}
+
+prepare_dirs
+
+# ── Konfigurasi (opsional) ───────────────────────────────────────────────────
+# Override lewat $CONFIG_FILE, mis:
+#   DSH_WEB_APP_PORT=3080
+#   DSH_WEB_APP_BROWSER=/usr/bin/google-chrome-stable
+#   DSH_WEB_APP_WINDOW=shell      # shell | app | browser
+#   DSH_WEB_APP_PROFILE=web
+#   DSH_WEB_APP_SIZE=1440,900
+#   DSH_WEB_APP_MAXIMIZED=1
+#   DSH_WEB_APP_DEBUG=0
+#
+#   shell   -> jendela Electron tanpa header OS, tombol min/max/close di dalam
+#              jendela (default; fallback otomatis ke "app" bila tak tersedia)
+#   app     -> jendela Chrome --app (header OS standar)
+#   browser -> tab Chrome biasa
+[ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+DSH_WEB_APP_PROFILE="${DSH_WEB_APP_PROFILE:-web}"
+DSH_WEB_APP_PORT="${DSH_WEB_APP_PORT:-3080}"
+DSH_WEB_APP_WINDOW="${DSH_WEB_APP_WINDOW:-shell}"
+DSH_WEB_APP_SIZE="${DSH_WEB_APP_SIZE:-1440,900}"
+DSH_WEB_APP_MAXIMIZED="${DSH_WEB_APP_MAXIMIZED:-0}"
+DSH_WEB_APP_DEBUG="${DSH_WEB_APP_DEBUG:-0}"
+# Aset shell dicari relatif ke script ini, atau lewat DSH_WEB_APP_ROOT. Tidak
+# ada path milik mesin pengembang di sini: paket harus jalan di mesin mana pun.
+DSH_WEB_APP_ROOT="${DSH_WEB_APP_ROOT:-}"
+if [ -z "$DSH_WEB_APP_ROOT" ]; then
+  for cand in "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" \
+              "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)" \
+              "$HOME/.local/share/$APP_ID"; do
+    if [ -f "$cand/shell/main.js" ] || [ -f "$cand/electron/main.js" ]; then
+      DSH_WEB_APP_ROOT="$cand"
+      break
+    fi
+  done
+fi
+DSH_WEB_APP_ROOT="${DSH_WEB_APP_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
+
+# Shell ada di <root>/shell untuk paket, atau <root>/electron untuk layout lama.
+if [ -n "${DSH_WEB_APP_ELECTRON_DIR:-}" ]; then
+  :
+elif [ -f "$DSH_WEB_APP_ROOT/shell/main.js" ]; then
+  DSH_WEB_APP_ELECTRON_DIR="$DSH_WEB_APP_ROOT/shell"
+else
+  DSH_WEB_APP_ELECTRON_DIR="$DSH_WEB_APP_ROOT/electron"
+fi
+
+# Binary Electron: dari CLI paket (require('electron')), lalu .vendor lokal.
+if [ -z "${DSH_WEB_APP_ELECTRON_BIN:-}" ]; then
+  for cand in "$DSH_WEB_APP_ROOT/.vendor/electron/electron" \
+              "$DSH_WEB_APP_ROOT/../node_modules/electron/dist/electron"; do
+    [ -x "$cand" ] && { DSH_WEB_APP_ELECTRON_BIN="$cand"; break; }
+  done
+fi
+
+log() {
+  printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$*" >>"$LOG_FILE" 2>/dev/null
+  [ "$DSH_WEB_APP_DEBUG" = "1" ] && printf '%s\n' "$*" >&2
+  return 0
+}
+
+notify() { # notify <ringkas> <isi>
+  notify-send -a "$APP_NAME" -i "$APP_ID" "$1" "$2" >/dev/null 2>&1 || true
+}
+
+fail() { # fail <pesan>
+  log "FATAL: $1"
+  notify "$APP_NAME gagal dijalankan" "$1
+Lihat log: $LOG_FILE"
+  exit 1
+}
+
+# ── Lingkungan ───────────────────────────────────────────────────────────────
+# Desktop launcher tidak mewarisi PATH shell. Tambahkan lokasi node yang lazim
+# tanpa mengunci versi: direktori node yang sedang dipakai, lalu nvm terbaru.
+if command -v node >/dev/null 2>&1; then
+  export PATH="$(dirname -- "$(command -v node)"):$PATH"
+fi
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+
+if ! command -v node >/dev/null 2>&1; then
+  # shellcheck disable=SC1090
+  [ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1
+  # nvm memilih versi default; kalau tidak ada, pakai versi terpasang terbaru.
+  if ! command -v node >/dev/null 2>&1 && [ -d "$HOME/.nvm/versions/node" ]; then
+    latest="$(ls -1 "$HOME/.nvm/versions/node" 2>/dev/null | sort -V | tail -n1)"
+    [ -n "$latest" ] && export PATH="$HOME/.nvm/versions/node/$latest/bin:$PATH"
+  fi
+fi
+command -v node >/dev/null 2>&1 || fail "Node.js tidak ditemukan. Pasang Node.js >= 20 lalu coba lagi."
+
+DSH_BIN="${DSH_WEB_APP_DSH_BIN:-}"
+if [ -z "$DSH_BIN" ]; then
+  if command -v dsh >/dev/null 2>&1; then
+    DSH_BIN="$(command -v dsh)"
+  elif [ -x "$(dirname -- "$(command -v node)")/dsh" ]; then
+    DSH_BIN="$(dirname -- "$(command -v node)")/dsh"
+  else
+    DSH_BIN="dsh"
+  fi
+fi
+command -v "$DSH_BIN" >/dev/null 2>&1 || [ -x "$DSH_BIN" ] \
+  || fail "Perintah 'dsh' tidak ditemukan. Pasang DeepSeek Harness (npm i -g @deepseek-ai/dsh) lebih dulu."
+
+find_browser() {
+  local c
+  for c in "${DSH_WEB_APP_BROWSER:-}" google-chrome-stable google-chrome chromium chromium-browser brave-browser microsoft-edge; do
+    [ -n "$c" ] || continue
+    if command -v "$c" >/dev/null 2>&1; then command -v "$c"; return 0; fi
+  done
+  return 1
+}
+BROWSER_BIN="$(find_browser)" || BROWSER_BIN=""
+
+# ── Utilitas proses ──────────────────────────────────────────────────────────
+pid_alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+
+port_in_use() { # port_in_use <port>
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1
+}
+
+read_file() { [ -r "$1" ] && head -n1 "$1" 2>/dev/null; }
+
+server_pid() { read_file "$SERVER_PID_FILE"; }
+server_url() { read_file "$SERVER_URL_FILE"; }
+
+# PID pemilik port (dipakai bila PID dari $! tidak mewakili proses server).
+pid_for_port() { # pid_for_port <port>
+  local p="$1"
+  ss -ltnpH "sport = :$p" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | head -n1
+}
+
+# Catatan klien berisi "<pid-browser> <pid-launcher>". Jendela dianggap hidup
+# bila proses browser-nya masih ada; launcher hanya cadangan.
+client_alive() { # client_alive <file-klien>
+  local f="$1" bpid lpid
+  read -r bpid lpid <"$f" 2>/dev/null || return 1
+  pid_alive "${bpid:-}" && return 0
+  pid_alive "${lpid:-}" && return 0
+  return 1
+}
+
+prune_clients() {
+  local f
+  for f in "$CLIENT_DIR"/*; do
+    [ -e "$f" ] || continue
+    client_alive "$f" || rm -f "$f" 2>/dev/null
+  done
+}
+
+live_clients() {
+  local n=0 f
+  for f in "$CLIENT_DIR"/*; do [ -e "$f" ] && n=$((n+1)); done
+  printf '%s' "$n"
+}
+
+# ── Janitor: matikan server saat tidak ada jendela tersisa ───────────────────
+# Dijalankan dalam sesi sendiri (setsid) agar tetap bekerja walau launcher mati.
+start_janitor() { # start_janitor <server_pid>
+  local spid="$1"
+  setsid bash -c '
+    J_SPID="$1"; J_CLIENT_DIR="$2"; J_PIDFILE="$3"; J_URLFILE="$4"; J_JANFILE="$5"; J_LOG="$6"
+
+    jlog() { printf "%s [janitor] %s\n" "$(date "+%Y-%m-%d %H:%M:%S")" "$*" >>"$J_LOG" 2>/dev/null; }
+    alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+    client_alive() {
+      local f="$1" bpid lpid
+      read -r bpid lpid <"$f" 2>/dev/null || return 1
+      alive "${bpid:-}" && return 0
+      alive "${lpid:-}" && return 0
+      return 1
+    }
+
+    trap - INT TERM HUP
+    sleep 5   # beri waktu jendela pertama mendaftar
+
+    while alive "$J_SPID"; do
+      for f in "$J_CLIENT_DIR"/*; do
+        [ -e "$f" ] || continue
+        client_alive "$f" || rm -f "$f" 2>/dev/null
+      done
+
+      live=0
+      for f in "$J_CLIENT_DIR"/*; do [ -e "$f" ] && live=$((live+1)); done
+
+      if [ "$live" -eq 0 ]; then
+        jlog "tidak ada jendela tersisa, menghentikan server $J_SPID"
+        kill -TERM "$J_SPID" 2>/dev/null
+        for _ in $(seq 1 25); do alive "$J_SPID" || break; sleep 0.2; done
+        alive "$J_SPID" && kill -KILL "$J_SPID" 2>/dev/null
+        break
+      fi
+      sleep 2
+    done
+
+    rm -f "$J_PIDFILE" "$J_URLFILE" "$J_JANFILE" 2>/dev/null
+  ' _ "$spid" "$CLIENT_DIR" "$SERVER_PID_FILE" "$SERVER_URL_FILE" "$JANITOR_PID_FILE" "$LOG_FILE" \
+    >/dev/null 2>&1 &
+
+  echo $! >"$JANITOR_PID_FILE"
+}
+
+# ── Nyalakan server ──────────────────────────────────────────────────────────
+start_server() {
+  local port="$DSH_WEB_APP_PORT"
+  if [ "$port" != "0" ] && port_in_use "$port"; then
+    log "port $port terpakai proses lain; membiarkan OS memilih port kosong"
+    port=0
+  fi
+
+  log "menjalankan server: $DSH_BIN --profile $DSH_WEB_APP_PROFILE --no-open --port $port"
+  : >"$SERVER_LOG"
+
+  # setsid: lepas dari terminal/sesi GUI; stdout+stderr ke log; stdin ditutup.
+  setsid "$DSH_BIN" --profile "$DSH_WEB_APP_PROFILE" --no-open --port "$port" \
+    >>"$SERVER_LOG" 2>&1 </dev/null &
+  local spid=$!
+
+  # Tunggu baris "dsh web: http://...?token=..." (maks ~120 detik).
+  local url="" i
+  for i in $(seq 1 600); do
+    url="$(sed -n 's/^dsh web: \(http[^ ]*\).*/\1/p' "$SERVER_LOG" 2>/dev/null | head -n1)"
+    [ -n "$url" ] && break
+    if ! pid_alive "$spid"; then
+      log "server mati saat start; potongan log:"
+      tail -n 40 "$SERVER_LOG" >>"$LOG_FILE" 2>/dev/null
+      rm -f "$SERVER_PID_FILE" "$SERVER_URL_FILE"
+      fail "Server DSH gagal dinyalakan. Cek log: $SERVER_LOG"
+    fi
+    sleep 0.2
+  done
+  if [ -z "$url" ]; then
+    kill -TERM "$spid" 2>/dev/null
+    fail "Server tidak melaporkan URL dalam batas waktu."
+  fi
+
+  # Pastikan PID yang dicatat benar-benar proses pemilik port.
+  local real_port pid_owner
+  real_port="$(printf '%s' "$url" | sed -n 's|^http://[^:/]*:\([0-9]\+\).*|\1|p')"
+  if [ -n "$real_port" ]; then
+    pid_owner="$(pid_for_port "$real_port")"
+    if [ -n "$pid_owner" ] && [ "$pid_owner" != "$spid" ] && pid_alive "$pid_owner"; then
+      log "PID server disesuaikan: $spid -> $pid_owner"
+      spid="$pid_owner"
+    fi
+  fi
+
+  printf '%s\n' "$spid" >"$SERVER_PID_FILE"
+  printf '%s\n' "$url" >"$SERVER_URL_FILE"
+  log "server siap: pid=$spid"
+  start_janitor "$spid"
+}
+
+# ── Buka jendela ─────────────────────────────────────────────────────────────
+# Chromium membuat <profil>/SingletonSocket; batas path socket Unix ~108 byte.
+# Pilih kandidat terpendek yang masih aman, dan pastikan benar-benar bisa dibuat.
+short_profile_dir() {
+  local cand base
+  for base in "${TMPDIR:-}" /run/user/$(id -u) /tmp; do
+    [ -n "$base" ] && [ -d "$base" ] && [ -w "$base" ] || continue
+    cand="$base/dshw.XXXXXX"
+    # Sisakan ruang untuk "/SingletonSocket" (16 byte) + margin.
+    if [ $(( ${#cand} + 16 )) -gt 100 ]; then
+      continue
+    fi
+    if mkdir -p "$base/dshw.XXXXXX" 2>/dev/null && rmdir "$base/dshw.XXXXXX" 2>/dev/null; then
+      mktemp -d "$cand" 2>/dev/null && return 0
+    fi
+  done
+  return 1
+}
+
+shell_available() {
+  [ -n "$DSH_WEB_APP_ELECTRON_BIN" ] && [ -x "$DSH_WEB_APP_ELECTRON_BIN" ] \
+    && [ -f "$DSH_WEB_APP_ELECTRON_DIR/main.js" ] \
+    && [ -f "$DSH_WEB_APP_ELECTRON_DIR/shell.html" ]
+}
+
+# Jendela shell Electron: tanpa header OS, tombol min/max/close di dalam jendela.
+# Mengembalikan 0 bila jendela sempat hidup, 2 bila gagal start (agar pemanggil
+# bisa jatuh kembali ke jendela Chrome --app).
+open_shell_window() { # open_shell_window <url> <file-klien>
+  local url="$1" client_file="$2"
+
+  # Chromium butuh sandbox. Di sistem tanpa SUID helper (atau di dalam sandbox
+  # DSH) jatuh ke mode tanpa sandbox; tetap aman karena isi jendela hanya GUI
+  # DSH lokal, dan halaman tidak punya akses Node (contextIsolation + sandbox).
+  local sandbox_args=()
+  local helper
+  helper="$(dirname -- "$DSH_WEB_APP_ELECTRON_BIN")/chrome-sandbox"
+  if ! { [ -u "$helper" ] && [ "$(stat -c %u "$helper" 2>/dev/null)" = "0" ]; }; then
+    sandbox_args+=(--no-sandbox)
+  fi
+
+  # Profil Electron per jendela: umur proses = umur jendela, dan tidak bentrok
+  # dengan sesi lain. HARUS pendek (socket Unix < ~108 byte).
+  local profile_dir=""
+
+  local extra=()
+  [ "$DSH_WEB_APP_MAXIMIZED" = "1" ] && extra+=(--maximized)
+
+  # Backend jendela dicoba berurutan. Electron memilih Wayland sendiri bila
+  # tersedia; di sesi X11-only / Wayland yang tidak bisa diakses, percobaan itu
+  # langsung gagal dan kita pindah ke X11.
+  local platforms=("" "--ozone-platform=x11")
+  local attempt bpid rc alive
+  for attempt in "${platforms[@]}"; do
+    local plat_args=()
+    [ -n "$attempt" ] && plat_args+=("$attempt")
+
+    # Profil dibuat ulang di setiap percobaan: Chromium tidak mau start bila
+    # direktori user-data-nya tidak ada.
+    profile_dir="$(short_profile_dir)" || {
+      notify "$APP_NAME" "Tidak bisa membuat direktori profil sementara."
+      return 2
+    }
+
+    log "membuka shell Electron (${attempt:-auto}): $DSH_WEB_APP_ELECTRON_BIN"
+    "$DSH_WEB_APP_ELECTRON_BIN" \
+      "${sandbox_args[@]}" \
+      --user-data-dir="$profile_dir" \
+      "${plat_args[@]}" \
+      --class="$APP_ID" \
+      --disable-background-mode \
+      "$DSH_WEB_APP_ELECTRON_DIR" \
+      --url "$url" --size "$DSH_WEB_APP_SIZE" "${extra[@]}" \
+      >>"$SERVER_LOG" 2>&1 &
+    bpid=$!
+    printf '%s %s\n' "$bpid" "$$" >"$client_file"
+
+    # Beri waktu inisialisasi; proses yang mati cepat berarti backend gagal.
+    alive=0
+    local i
+    for i in $(seq 1 50); do
+      pid_alive "$bpid" || break
+      [ "$i" -ge 30 ] && { alive=1; break; }
+      sleep 0.1
+    done
+    pid_alive "$bpid" && alive=1
+
+    if [ "$alive" = "1" ]; then
+      wait "$bpid" 2>/dev/null; rc=$?
+      rm -rf "$profile_dir" 2>/dev/null
+      log "jendela shell ditutup (rc=$rc)"
+      return 0
+    fi
+
+    log "shell Electron gagal start pada ${attempt:-auto}; mencoba backend berikutnya"
+    rm -rf "$profile_dir" 2>/dev/null
+  done
+
+  printf '%s %s\n' "0" "$$" >"$client_file"
+  return 2
+}
+
+open_window() { # open_window <url> <file-klien>
+  local url="$1" client_file="$2" profile_dir bpid rc
+
+  # Prioritas: shell Electron, bila tersedia dan tidak dimatikan lewat config.
+  # Bila shell gagal start sama sekali (rc=2), lanjut ke jendela Chrome --app
+  # supaya pengguna tetap mendapat jendela, bukan pesan error.
+  if [ "$DSH_WEB_APP_WINDOW" = "shell" ]; then
+    if shell_available; then
+      local shell_rc=0
+      open_shell_window "$url" "$client_file" || shell_rc=$?
+      [ "$shell_rc" -ne 2 ] && return "$shell_rc"
+      log "shell Electron tidak bisa start; jatuh kembali ke jendela Chrome --app"
+    else
+      log "shell Electron tidak tersedia; jatuh kembali ke jendela Chrome --app"
+    fi
+  fi
+
+  # Profil Chromium per jendela: tidak bentrok dengan Chrome harian, dan umur
+  # proses browser = umur jendela (dasar aturan "tutup jendela -> server mati").
+  # Penting: Chromium menaruh SingletonSocket di dalam profil dan path socket
+  # Unix dibatasi ~108 byte. $TMPDIR bisa panjang ($XDG_RUNTIME_DIR), jadi pakai
+  # kandidat terpendek yang masih muat — kalau tidak, jendela langsung mati.
+  profile_dir="$(short_profile_dir)" || {
+    notify "$APP_NAME" "Tidak bisa membuat direktori profil sementara."
+    return 1
+  }
+
+  if [ -z "$BROWSER_BIN" ]; then
+    notify "$APP_NAME" "Browser berbasis Chromium tidak ditemukan; membuka di browser default."
+    xdg-open "$url" >/dev/null 2>&1 &
+    bpid=$!
+    printf '%s %s\n' "$bpid" "$$" >"$client_file"
+    wait "$bpid" 2>/dev/null; rc=$?
+    rm -rf "$profile_dir" 2>/dev/null
+    return $rc
+  fi
+
+  if [ "$DSH_WEB_APP_WINDOW" = "browser" ]; then
+    "$BROWSER_BIN" --no-first-run --no-default-browser-check \
+      --disable-background-mode \
+      --user-data-dir="$profile_dir" "$url" >/dev/null 2>&1 &
+  else
+    "$BROWSER_BIN" \
+      --app="$url" \
+      --class="$APP_ID" \
+      --user-data-dir="$profile_dir" \
+      --no-first-run --no-default-browser-check \
+      --hide-crash-restore-bubble \
+      --disable-background-mode \
+      --disable-features=Translate,MediaRouter \
+      --window-size="$DSH_WEB_APP_SIZE" \
+      >/dev/null 2>&1 &
+  fi
+  bpid=$!
+  printf '%s %s\n' "$bpid" "$$" >"$client_file"
+
+  wait "$bpid" 2>/dev/null; rc=$?
+  rm -rf "$profile_dir" 2>/dev/null
+  return $rc
+}
+
+# ── Alur utama ───────────────────────────────────────────────────────────────
+main() {
+  exec 9>"$LOCK_FILE"
+  flock -w 180 9 || fail "Tidak bisa mengunci state $APP_ID (proses lain macet?)."
+
+  local client_file="$CLIENT_DIR/$$"
+  # Daftar sebagai klien hidup SEBELUM server dinyalakan, agar janitor tidak
+  # salah menyimpulkan "tidak ada jendela" saat server baru saja naik.
+  printf '%s %s\n' "0" "$$" >"$client_file"
+  # shellcheck disable=SC2064
+  trap "rm -f '$client_file'" EXIT
+  trap 'exit 130' INT TERM HUP
+
+  local url spid
+  spid="$(server_pid)"
+  url="$(server_url)"
+
+  if pid_alive "$spid" && [ -n "$url" ]; then
+    log "memakai ulang server yang sudah berjalan (pid=$spid)"
+  else
+    rm -f "$SERVER_PID_FILE" "$SERVER_URL_FILE"
+    prune_clients
+    start_server
+    url="$(server_url)"
+  fi
+
+  flock -u 9
+
+  log "membuka jendela: ${url%%\?*}"
+  open_window "$url" "$client_file"
+  log "sesi jendela selesai"
+}
+
+main "$@"

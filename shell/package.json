@@ -1,0 +1,8 @@
+{
+  "name": "dsh-desktop-shell",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron window shell for DSH Desktop: frameless window with in-window controls.",
+  "main": "main.js",
+  "//": "JANGAN tambahkan \"type\": \"module\" di sini. File di folder ini ditulis sebagai CommonJS (require) dan Electron memuat main.js sebagai entri app. Root package.json memakai ESM untuk CLI, jadi batas CommonJS/ESM dijaga di folder ini."
+}

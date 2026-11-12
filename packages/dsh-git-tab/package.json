@@ -1,0 +1,68 @@
+{
+  "name": "dsh-git-tab",
+  "version": "0.1.0",
+  "description": "Read-only Git tab for the DeepSeek Harness right sidebar: repositories, branches, changes, diffs, commits.",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Jeje Prananda",
+    "url": "https://github.com/jejeprananda"
+  },
+  "homepage": "https://github.com/jejeprananda/dsh-headless-desktop-for-linux/tree/main/packages/dsh-git-tab#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jejeprananda/dsh-headless-desktop-for-linux.git",
+    "directory": "packages/dsh-git-tab"
+  },
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "git",
+    "sidebar",
+    "diff"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ]
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.0-rc.1+": "compatible"
+      }
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1 <5"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "dsh": ">=0.2.0 <0.3.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

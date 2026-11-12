@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:;" />
+<title>DeepSeek Harness</title>
+<style>
+  :root {
+    /* Tema gelap (default). Nilai terang ditimpa lewat [data-theme="light"]. */
+    --strip-bg: #151517;
+    --strip-fg: #8b8b94;
+    --strip-fg-strong: #f2f2f4;
+    --strip-border: rgba(255, 255, 255, 0.06);
+    --btn-hover: rgba(255, 255, 255, 0.08);
+    --btn-active: rgba(255, 255, 255, 0.14);
+    --focus-ring: rgba(255, 255, 255, 0.35);
+    --close-hover: #c42b1c;
+    --close-active: #a52215;
+  }
+
+  :root[data-theme="light"] {
+    --strip-bg: #f6f5f3;
+    --strip-fg: #6b6b73;
+    --strip-fg-strong: #1c1c1f;
+    --strip-border: rgba(0, 0, 0, 0.09);
+    --btn-hover: rgba(0, 0, 0, 0.06);
+    --btn-active: rgba(0, 0, 0, 0.11);
+    --focus-ring: rgba(0, 0, 0, 0.35);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--strip-bg);
+    overflow: hidden;
+    font: 500 12px/1 system-ui, -apple-system, "Segoe UI", Ubuntu, Cantarell, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  .strip {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--strip-h, 36px);
+    display: flex;
+    align-items: stretch;
+    background: var(--strip-bg);
+    border-bottom: 1px solid var(--strip-border);
+    -webkit-app-region: drag;
+    app-region: drag;
+    cursor: default;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-left: 12px;
+    color: var(--strip-fg);
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+    overflow: hidden;
+    opacity: 0.9;
+  }
+
+  .brand img {
+    width: 14px;
+    height: 14px;
+    opacity: 0.85;
+  }
+
+  .brand .name {
+    font-weight: 600;
+    font-size: 11.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  /* Area drag fleksibel di tengah; mengisi semua ruang sisa. */
+  .drag-fill {
+    flex: 1 1 auto;
+    min-width: 40px;
+    height: 100%;
+    -webkit-app-region: drag;
+    app-region: drag;
+  }
+
+  .controls {
+    display: flex;
+    align-items: stretch;
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+    flex: 0 0 auto;
+    height: 100%;
+  }
+
+  .ctl {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 100%;
+    padding: 0;
+    margin: 0;
+    border: 0;
+    background: transparent;
+    color: var(--strip-fg);
+    cursor: default;
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+    transition: background-color 90ms ease, color 90ms ease;
+  }
+
+  .ctl:hover { background: var(--btn-hover); color: var(--strip-fg-strong); }
+  .ctl:active { background: var(--btn-active); }
+  .ctl:focus-visible {
+    outline: 1px solid var(--focus-ring);
+    outline-offset: -3px;
+  }
+
+  .ctl.close:hover { background: var(--close-hover); color: #fff; }
+  .ctl.close:active { background: var(--close-active); }
+
+  .ctl svg { width: 10px; height: 10px; display: block; }
+  .ctl.close svg { width: 10px; height: 10px; }
+</style>
+</head>
+<body>
+  <div class="strip" id="strip">
+    <div class="brand">
+      <img src="icon.png" alt="" />
+      <span class="name">DeepSeek Harness</span>
+    </div>
+    <div class="drag-fill" id="dragFill"></div>
+    <div class="controls">
+      <button class="ctl" id="btn-min" type="button" title="Minimize" aria-label="Minimize">
+        <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+      </button>
+      <button class="ctl" id="btn-max" type="button" title="Maximize" aria-label="Maximize">
+        <svg viewBox="0 0 10 10" aria-hidden="true"><rect x="2.2" y="2.2" width="5.6" height="5.6" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+      </button>
+      <button class="ctl close" id="btn-close" type="button" title="Close" aria-label="Close">
+        <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2.6 2.6l4.8 4.8M7.4 2.6L2.6 7.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  </div>
+
+<script>
+  const api = window.dshChrome;
+
+  const minIcon = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>';
+  const maxIcon = '<svg viewBox="0 0 10 10" aria-hidden="true"><rect x="2.2" y="2.2" width="5.6" height="5.6" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>';
+  const restoreIcon = '<svg viewBox="0 0 10 10" aria-hidden="true"><rect x="2" y="3.2" width="4.6" height="4.6" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M3.4 3.2V2.2h4.6v4.6H7" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>';
+
+  const btnMin = document.getElementById('btn-min');
+  const btnMax = document.getElementById('btn-max');
+  const btnClose = document.getElementById('btn-close');
+  const dragFill = document.getElementById('dragFill');
+
+  btnMin.addEventListener('click', () => api.minimize());
+  btnMax.addEventListener('click', () => api.toggleMaximize());
+  btnClose.addEventListener('click', () => api.close());
+
+  api.onState((state) => {
+    btnMax.innerHTML = state.maximized ? restoreIcon : maxIcon;
+    const label = state.maximized ? 'Restore' : 'Maximize';
+    btnMax.title = label;
+    btnMax.setAttribute('aria-label', label);
+    if (typeof state.dark === 'boolean') {
+      document.documentElement.dataset.theme = state.dark ? 'dark' : 'light';
+    }
+  });
+  api.requestState();
+
+  // Dobel-klik area drag = maximize / restore, seperti titlebar native.
+  dragFill.addEventListener('dblclick', () => api.toggleMaximize());
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=DSH Desktop
+GenericName=DeepSeek Harness
+Comment=DeepSeek Harness sebagai jendela desktop tanpa header OS
+Comment[en]=DeepSeek Harness as a desktop window without the OS title bar
+Exec=@BIN@
+TryExec=@BIN@
+Icon=@ICON@
+Terminal=false
+Categories=Development;
+Keywords=dsh;deepseek;harness;ai;agent;web;electron;
+StartupNotify=true
+StartupWMClass=dsh-desktop

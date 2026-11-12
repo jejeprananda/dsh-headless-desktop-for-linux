@@ -1,0 +1,66 @@
+{
+  "name": "dsh-headless-desktop-for-linux",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness as a native-feeling Linux desktop window: no OS title bar, window controls drawn inside the app.",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Jeje Prananda",
+    "url": "https://github.com/jejeprananda"
+  },
+  "homepage": "https://github.com/jejeprananda/dsh-headless-desktop-for-linux#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jejeprananda/dsh-headless-desktop-for-linux.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jejeprananda/dsh-headless-desktop-for-linux/issues"
+  },
+  "bin": {
+    "dsh-desktop": "./bin/dsh-desktop.mjs"
+  },
+  "files": [
+    "bin",
+    "shell",
+    "launcher",
+    "desktop",
+    "icons",
+    "packages/dsh-git-tab",
+    "README.md",
+    "README.id.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "electron",
+    "desktop",
+    "linux",
+    "frameless",
+    "wayland",
+    "x11"
+  ],
+  "os": [
+    "linux"
+  ],
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.2.0 <0.3.0"
+  },
+  "dependencies": {
+    "electron": "41.4.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

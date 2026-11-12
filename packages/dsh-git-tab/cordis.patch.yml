@@ -1,0 +1,6 @@
+# Loader patch untuk bundle dsh-git-tab.
+# Satu baris memuat kedua half: index.js (Host, route /api/git.*) dan
+# client.js (tab sidebar kanan), karena loader memasangkannya dari paket yang sama.
+- insert:
+    - id: git-tab
+      name: dsh-git-tab
